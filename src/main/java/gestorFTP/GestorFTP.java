@@ -3,7 +3,9 @@ package gestorFTP;
 import java.io.*;
 import java.nio.file.*;
 import java.net.SocketException;
-
+import java.security.Key;
+import javax.crypto.Cipher;
+import javax.crypto.spec.SecretKeySpec;
 import org.apache.commons.net.ftp.FTP;
 import org.apache.commons.net.ftp.FTPClient;
 import org.apache.commons.net.ftp.FTPReply;
@@ -15,9 +17,18 @@ public class GestorFTP {
     private static final String USUARIO = "joseftp";
     private static final String PASSWORD = "12345678";
     private static final String LOCAL_FOLDER = "C:\\Users\\otero\\Desktop\\local";
+    private static final String CLAVE_AES = "JoseOteros19_123";
+    private Key claveSecreta;
+
+    private static final String[] EXTENSIONES_TEXTO = {".txt"};
 
     public GestorFTP() {
         clienteFTP = new FTPClient();
+        try {
+            claveSecreta = new SecretKeySpec(CLAVE_AES.getBytes(), "AES");
+        } catch (Exception e) {
+            System.err.println("Error al inicializar la clave AES: " + e.getMessage());
+        }
     }
 
     private void conectar() throws SocketException, IOException {
@@ -42,30 +53,72 @@ public class GestorFTP {
         System.out.println("Desconectado");
     }
 
-    private void subirFichero(Path path) throws IOException {
-        conectar();
-        File file = path.toFile();
-        System.out.println("Enviando archivo: " + file.getName());
-        FileInputStream is = new FileInputStream(file);
-        boolean enviado = clienteFTP.storeFile(path.getFileName().toString(), is);
-        is.close();
-        int replyCode = clienteFTP.getReplyCode();
-        if (enviado) {
-            System.out.println("Fichero " + path.getFileName() + " enviado correctamente");
-        } else {
-            System.out.println("Error al enviar el fichero " + path.getFileName() + ". Código de respuesta: " + replyCode);
+    private boolean esArchivoDeTexto(String nombreArchivo) {
+        nombreArchivo = nombreArchivo.toLowerCase();
+        for (String extension : EXTENSIONES_TEXTO) {
+            if (nombreArchivo.endsWith(extension)) {
+                return true;
+            }
         }
-        desconectar();
+        return false;
     }
 
+    private byte[] cifrarContenido(byte[] contenido) throws Exception {
+        Cipher cipher = Cipher.getInstance("AES");
+        cipher.init(Cipher.ENCRYPT_MODE, claveSecreta);
+        return cipher.doFinal(contenido);
+    }
+
+    private byte[] descifrarContenido(byte[] contenidoCifrado) throws Exception {
+        Cipher cipher = Cipher.getInstance("AES");
+        cipher.init(Cipher.DECRYPT_MODE, claveSecreta);
+        return cipher.doFinal(contenidoCifrado);
+    }
+
+    private void subirFichero(Path path) throws IOException {
+        File file = path.toFile();
+        if (!file.exists()) {
+            System.out.println("Error: El archivo " + file.getName() + " no existe.");
+            return;
+        }
+        conectar();
+        System.out.println("Enviando archivo: " + file.getName());
+        try {
+            boolean enviado;
+            if (esArchivoDeTexto(file.getName())) {
+                byte[] contenido = Files.readAllBytes(path);
+                byte[] contenidoCifrado = cifrarContenido(contenido);
+                String nombreCifrado = file.getName();
+                System.out.println("Cifrando archivo de texto: " + file.getName());
+                InputStream is = new ByteArrayInputStream(contenidoCifrado);
+                enviado = clienteFTP.storeFile(nombreCifrado, is);
+                is.close();
+            } else {
+                FileInputStream is = new FileInputStream(file);
+                enviado = clienteFTP.storeFile(file.getName(), is);
+                is.close();
+            }
+
+            int replyCode = clienteFTP.getReplyCode();
+            if (enviado) {
+                System.out.println("Fichero " + path.getFileName() + " enviado correctamente");
+            } else {
+                System.out.println("Error al enviar el fichero " + path.getFileName() + ". Código de respuesta: " + replyCode);
+            }
+        } catch (Exception e) {
+            System.err.println("Error al procesar el archivo " + file.getName() + ": " + e.getMessage());
+        } finally {
+            desconectar();
+        }
+    }
 
     private void eliminarFichero(String fileName) throws IOException {
         conectar();
-        boolean deleted = clienteFTP.deleteFile(fileName);
-        if (deleted) {
-            System.out.println("Fichero " + fileName + " eliminado correctamente");
-        } else {
-            System.out.println("Error al eliminar el fichero " + fileName);
+            boolean deleted = clienteFTP.deleteFile(fileName);
+            if (deleted) {
+                System.out.println("Fichero " + fileName + " eliminado correctamente");
+            } else {
+                System.out.println("Error al eliminar el fichero " + fileName);
         }
         desconectar();
     }
@@ -77,28 +130,34 @@ public class GestorFTP {
             return;
         }
         conectar();
-        String remoteFilePath = "/ftp/" + file.getName();
-        FileInputStream fis = new FileInputStream(file);
-        boolean actualizado = clienteFTP.storeFile(remoteFilePath, fis);
-        fis.close();
-        int replyCode = clienteFTP.getReplyCode();
-        if (actualizado) {
-            System.out.println("Fichero " + file.getName() + " actualizado correctamente en el servidor.");
-        } else {
-            System.out.println("Error al actualizar el fichero " + file.getName() + ". Código de respuesta: " + replyCode);
-        }
-        desconectar();
-    }
+        try {
+            boolean actualizado;
+            if (esArchivoDeTexto(file.getName())) {
+                byte[] contenido = Files.readAllBytes(path);
+                byte[] contenidoCifrado = cifrarContenido(contenido);
+                String nombreCifrado = file.getName();
+                String remoteFilePath = "/ftp/" + nombreCifrado;
+                System.out.println("Actualizando archivo de texto cifrado: " + nombreCifrado);
+                InputStream is = new ByteArrayInputStream(contenidoCifrado);
+                actualizado = clienteFTP.storeFile(remoteFilePath, is);
+                is.close();
+            } else {
+                String remoteFilePath = "/ftp/" + file.getName();
+                FileInputStream fis = new FileInputStream(file);
+                actualizado = clienteFTP.storeFile(remoteFilePath, fis);
+                fis.close();
+            }
 
-
-    private void descargarFichero(String ficheroRemoto, String pathLocal) throws IOException {
-        OutputStream os = new FileOutputStream(pathLocal);
-        boolean recibido = clienteFTP.retrieveFile(ficheroRemoto, os);
-        os.close();
-        if (recibido) {
-            System.out.println("Fichero recibido correctamente");
-        } else {
-            System.out.println("Error al recibir el fichero");
+            int replyCode = clienteFTP.getReplyCode();
+            if (actualizado) {
+                System.out.println("Fichero " + file.getName() + " actualizado correctamente en el servidor.");
+            } else {
+                System.out.println("Error al actualizar el fichero " + file.getName() + ". Código de respuesta: " + replyCode);
+            }
+        } catch (Exception e) {
+            System.err.println("Error al procesar el archivo " + file.getName() + ": " + e.getMessage());
+        } finally {
+            desconectar();
         }
     }
 
