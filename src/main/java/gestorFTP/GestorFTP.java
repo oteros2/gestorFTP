@@ -4,6 +4,9 @@ import java.io.*;
 import java.nio.file.*;
 import java.net.SocketException;
 import java.security.Key;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.locks.ReentrantLock;
 import javax.crypto.Cipher;
 import javax.crypto.spec.SecretKeySpec;
 
@@ -22,6 +25,8 @@ public class GestorFTP {
     private static final String CLAVE_AES = "JoseOteros19_123"; // Clave utilizada para cifrar archivos de texto
     private Key claveSecreta; // Objeto que almacena la clave de cifrado AES
     private static final String[] EXTENSIONES_TEXTO = {".txt"}; // Lista de extensiones de archivos de texto que serán cifrados
+    private final ExecutorService executorService; // Servicio para lanzar hilos y realizar operaciones en paralelo
+    private final ReentrantLock lock = new ReentrantLock(); // Objeto de bloqueo para sincronización de hilos
 
     // Constructor de la clase
     public GestorFTP() {
@@ -32,6 +37,8 @@ public class GestorFTP {
         } catch (Exception e) {
             System.err.println("Error al inicializar la clave AES: " + e.getMessage());
         }
+        // Se crea un pool de hilos para realizar operaciones en paralelo
+        executorService = Executors.newFixedThreadPool(10);
     }
 
     // Método para conectar al servidor FTP
@@ -103,150 +110,227 @@ public class GestorFTP {
         return cipher.doFinal(contenidoCifrado);
     }
 
+    // Método para descifrar un archivo de texto
+    private void descifrarArchivo(File file) throws Exception {
+        // Se lee el contenido cifrado del archivo
+        byte[] contenidoCifrado = Files.readAllBytes(file.toPath());
+        // Se descifra el contenido
+        byte[] contenidoDescifrado = descifrarContenido(contenidoCifrado);
+        // Se escribe el contenido descifrado en el archivo
+        Files.write(file.toPath(), contenidoDescifrado);
+        System.out.println("Archivo " + file.getName() + " descifrado correctamente");
+    }
+
     // Método para subir un archivo al servidor FTP
     private void subirFichero(Path path) throws IOException {
-        // Se obtiene el archivo desde la ruta
-        File file = path.toFile();
-        // Verifica si el archivo existe antes de intentar subirlo
-        if (!file.exists()) {
-            System.out.println("Error: El archivo " + file.getName() + " no existe.");
-            return;
-        }
-        // Establece conexión con el servidor FTP
-        conectar();
-        System.out.println("Enviando archivo: " + file.getName());
-
-        try {
-            boolean enviado;
-            // Si es un archivo de texto, se cifra antes de enviarlo
-            if (esArchivoDeTexto(file.getName())) {
-                // Lee el contenido del archivo y lo convierte a bytes
-                byte[] contenido = Files.readAllBytes(path);
-                // Cifra el contenido
-                byte[] contenidoCifrado = cifrarContenido(contenido);
-                String nombreCifrado = file.getName();
-
-                System.out.println("Cifrando archivo de texto: " + file.getName());
-
-                // Convierte el contenido cifrado en un InputStream
-                InputStream is = new ByteArrayInputStream(contenidoCifrado);
-                // Envía el archivo cifrado al servidor FTP
-                enviado = clienteFTP.storeFile(nombreCifrado, is);
-                is.close();
-            } else {
-                // Si no es un archivo de texto, se envía sin cifrar
-                FileInputStream is = new FileInputStream(file);
-                enviado = clienteFTP.storeFile(file.getName(), is);
-                is.close();
+        // Se envía la subida del archivo en un hilo separado
+        executorService.submit(() -> {
+            // Se obtiene el archivo desde la ruta
+            File file = path.toFile();
+            // Verifica si el archivo existe antes de intentar subirlo
+            if (!file.exists()) {
+                System.out.println("Error: El archivo " + file.getName() + " no existe.");
+                return;
             }
+            try {
+                lock.lock();
+                // Establece conexión con el servidor FTP
+                conectar();
+                System.out.println("Enviando archivo: " + file.getName());
+                boolean enviado;
+                // Si es un archivo de texto, se cifra antes de enviarlo
+                if (esArchivoDeTexto(file.getName())) {
+                    // Lee el contenido del archivo y lo convierte a bytes
+                    byte[] contenido = Files.readAllBytes(path);
+                    // Cifra el contenido
+                    byte[] contenidoCifrado = cifrarContenido(contenido);
+                    String nombreCifrado = file.getName();
 
-            // Verifica si el archivo fue enviado correctamente
-            int replyCode = clienteFTP.getReplyCode();
-            if (enviado) {
-                System.out.println("Fichero " + path.getFileName() + " enviado correctamente");
-            } else {
-                System.out.println("Error al enviar el fichero " + path.getFileName() + ". Código de respuesta: " + replyCode);
+                    System.out.println("Cifrando archivo de texto: " + file.getName());
+
+                    // Convierte el contenido cifrado en un InputStream
+                    InputStream is = new ByteArrayInputStream(contenidoCifrado);
+                    // Envía el archivo cifrado al servidor FTP
+                    enviado = clienteFTP.storeFile(nombreCifrado, is);
+                    is.close();
+                } else {
+                    // Si no es un archivo de texto, se envía sin cifrar
+                    FileInputStream is = new FileInputStream(file);
+                    enviado = clienteFTP.storeFile(file.getName(), is);
+                    is.close();
+                }
+
+                // Verifica si el archivo fue enviado correctamente
+                int replyCode = clienteFTP.getReplyCode();
+                if (enviado) {
+                    System.out.println("Fichero " + path.getFileName() + " enviado correctamente");
+                } else {
+                    System.out.println("Error al enviar el fichero " + path.getFileName() + ". Código de respuesta: " + replyCode);
+                }
+            } catch (Exception e) {
+                System.err.println("Error al procesar el archivo " + file.getName() + ": " + e.getMessage());
+            } finally {
+                try {
+                    // Desconecta del servidor FTP
+                    desconectar();
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                } finally {
+                    lock.unlock();
+                }
             }
-        } catch (Exception e) {
-            System.err.println("Error al procesar el archivo " + file.getName() + ": " + e.getMessage());
-        } finally {
-            // Desconecta del servidor FTP
-            desconectar();
-        }
+        });
     }
 
     // Método para eliminar un archivo del servidor FTP
     private void eliminarFichero(String fileName) throws IOException {
-        // Establece conexión con el servidor FTP
-        conectar();
-        boolean deleted = clienteFTP.deleteFile(fileName);
-        // Verifica si el archivo fue eliminado correctamente
-        if (deleted) {
-            System.out.println("Fichero " + fileName + " eliminado correctamente");
-        } else {
-            System.out.println("Error al eliminar el fichero " + fileName);
-        }
-        desconectar();
+        // Se envía la eliminación del archivo en un hilo separado
+        executorService.submit(() -> {
+            try {
+                lock.lock();
+                // Establece conexión con el servidor FTP
+                conectar();
+                boolean deleted = clienteFTP.deleteFile(fileName);
+                // Verifica si el archivo fue eliminado correctamente
+                if (deleted) {
+                    System.out.println("Fichero " + fileName + " eliminado correctamente");
+                }
+            } catch (Exception e) {
+                System.err.println("Error al eliminar el archivo " + fileName + ": " + e.getMessage());
+            } finally {
+                try {
+                    // Desconecta del servidor FTP
+                    desconectar();
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                } finally {
+                    lock.unlock();
+                }
+            }
+        });
     }
 
     // Método para actualizar un archivo en el servidor FTP
     private void actualizarFichero(Path path) throws IOException {
-        // Se obtiene el archivo desde la ruta
-        File file = path.toFile();
-        // Verifica si el archivo existe antes de intentar actualizarlo
-        if (!file.exists()) {
-            System.out.println("Error: El archivo " + file.getName() + " no existe.");
-            return;
-        }
-        // Establece conexión con el servidor FTP
-        conectar();
-        try {
-            // Si es un archivo de texto, se cifra antes de actualizarlo
-            boolean actualizado;
-            if (esArchivoDeTexto(file.getName())) {
-                // Lee el contenido del archivo y lo convierte a bytes
-                byte[] contenido = Files.readAllBytes(path);
-                // Cifra el contenido
-                byte[] contenidoCifrado = cifrarContenido(contenido);
-                String nombreCifrado = file.getName();
-                String remoteFilePath = "/ftp/" + nombreCifrado;
-                System.out.println("Actualizando archivo de texto cifrado: " + nombreCifrado);
-                InputStream is = new ByteArrayInputStream(contenidoCifrado);
-                actualizado = clienteFTP.storeFile(remoteFilePath, is);
-                is.close();
-            } else {
-                // Si no es un archivo de texto, se actualiza sin cifrar
-                String remoteFilePath = "/ftp/" + file.getName();
-                FileInputStream fis = new FileInputStream(file);
-                actualizado = clienteFTP.storeFile(remoteFilePath, fis);
-                fis.close();
+        // Se envía la actualización del archivo en un hilo separado
+        executorService.submit(() -> {
+            // Se obtiene el archivo desde la ruta
+            File file = path.toFile();
+            // Verifica si el archivo existe antes de intentar actualizarlo
+            if (!file.exists()) {
+                System.out.println("Error: El archivo " + file.getName() + " no existe.");
+                return;
             }
-            int replyCode = clienteFTP.getReplyCode();
-            // Verifica si el archivo fue actualizado correctamente
-            if (actualizado) {
-                System.out.println("Fichero " + file.getName() + " actualizado correctamente en el servidor.");
-            } else {
-                System.out.println("Error al actualizar el fichero " + file.getName() + ". Código de respuesta: " + replyCode);
+            try {
+                lock.lock();
+                // Establece conexión con el servidor FTP
+                conectar();
+                // Si es un archivo de texto, se cifra antes de actualizarlo
+                boolean actualizado;
+                if (esArchivoDeTexto(file.getName())) {
+                    // Lee el contenido del archivo y lo convierte a bytes
+                    byte[] contenido = Files.readAllBytes(path);
+                    // Cifra el contenido
+                    byte[] contenidoCifrado = cifrarContenido(contenido);
+                    String nombreCifrado = file.getName();
+                    String remoteFilePath = "/ftp/" + nombreCifrado;
+                    System.out.println("Actualizando archivo de texto cifrado: " + nombreCifrado);
+                    InputStream is = new ByteArrayInputStream(contenidoCifrado);
+                    actualizado = clienteFTP.storeFile(remoteFilePath, is);
+                    is.close();
+                } else {
+                    // Si no es un archivo de texto, se actualiza sin cifrar
+                    String remoteFilePath = "/ftp/" + file.getName();
+                    FileInputStream fis = new FileInputStream(file);
+                    actualizado = clienteFTP.storeFile(remoteFilePath, fis);
+                    fis.close();
+                }
+                int replyCode = clienteFTP.getReplyCode();
+                // Verifica si el archivo fue actualizado correctamente
+                if (actualizado) {
+                    System.out.println("Fichero " + file.getName() + " actualizado correctamente en el servidor.");
+                } else {
+                    System.out.println("Error al actualizar el fichero " + file.getName() + ". Código de respuesta: " + replyCode);
+                }
+            } catch (Exception e) {
+                System.err.println("Error al procesar el archivo " + file.getName() + ": " + e.getMessage());
+            } finally {
+                try {
+                    desconectar();
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                } finally {
+                    lock.unlock();
+                }
             }
-        } catch (Exception e) {
-            System.err.println("Error al procesar el archivo " + file.getName() + ": " + e.getMessage());
-        } finally {
-            desconectar();
-        }
+        });
     }
 
     // Método para descargar un archivo del servidor FTP
-     void descargarFichero(String fileName) throws IOException {
-        // Establece conexión con el servidor FTP
-        conectar();
-        try {
-            String remoteFilePath = "/ftp/" + fileName;
-            File downloadFile = new File(LOCAL_FOLDER + File.separator + fileName);
-            OutputStream outputStream = new BufferedOutputStream(new FileOutputStream(downloadFile));
-            boolean success = clienteFTP.retrieveFile(remoteFilePath, outputStream);
-            outputStream.close();
+    void descargarFichero(String fileName) throws IOException {
+        // Se envía la descarga del archivo en un hilo separado
+        executorService.submit(() -> {
+            try {
+                lock.lock();
+                // Establece conexión con el servidor FTP
+                conectar();
+                String remoteFilePath = "/ftp/" + fileName;
+                File downloadFile = new File(LOCAL_FOLDER + File.separator + fileName);
+                OutputStream outputStream = new BufferedOutputStream(new FileOutputStream(downloadFile));
+                boolean success = clienteFTP.retrieveFile(remoteFilePath, outputStream);
+                outputStream.close();
 
-            if (success) {
-                System.out.println("Fichero " + fileName + " descargado correctamente");
-                // Si es un archivo de texto, se descifra
-                if (esArchivoDeTexto(fileName)) {
-                    descifrarArchivo(downloadFile);
+                if (success) {
+                    System.out.println("Fichero " + fileName + " descargado correctamente");
+                    // Si es un archivo de texto, se descifra
+                    if (esArchivoDeTexto(fileName)) {
+                        descifrarArchivo(downloadFile);
+                    }
+                } else {
+                    System.out.println("Error al descargar el fichero " + fileName);
                 }
-            } else {
-                System.out.println("Error al descargar el fichero " + fileName);
+            } catch (Exception e) {
+                System.err.println("Error al descargar el archivo " + fileName + ": " + e.getMessage());
+            } finally {
+                try {
+                    desconectar();
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                } finally {
+                    lock.unlock();
+                    executorService.shutdown();
+                }
             }
-            desconectar();
-        } catch (Exception e) {
-            System.err.println("Error al descargar el archivo " + fileName + ": " + e.getMessage());
-        }
+        });
     }
 
-    // Método para descifrar un archivo de texto
-    private void descifrarArchivo(File file) throws Exception {
-        byte[] contenidoCifrado = Files.readAllBytes(file.toPath());
-        byte[] contenidoDescifrado = descifrarContenido(contenidoCifrado);
-        Files.write(file.toPath(), contenidoDescifrado);
-        System.out.println("Archivo " + file.getName() + " descifrado correctamente");
+    // Método para descargar todos los archivos de la carpeta local
+    void descargarTodosLosArchivos() {
+        executorService.submit(() -> {
+            try {
+                lock.lock();
+                // Establece conexión con el servidor FTP
+                conectar();
+                // Lista los archivos en el directorio remoto
+                FTPFile[] files = clienteFTP.listFiles("/ftp");
+                for (FTPFile file : files) {
+                    if (!file.isDirectory()) {
+                        descargarFichero(file.getName());
+                    }
+                }
+            } catch (IOException ex) {
+                System.err.println("Error al descargar los archivos. Excepción: " + ex.getMessage());
+            } finally {
+                try {
+                    desconectar();
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                } finally {
+                    lock.unlock();
+                    executorService.shutdown();
+                }
+            }
+        });
     }
 
     // Método que monitorea la carpeta local y sincroniza los cambios con el servidor FTP
@@ -287,24 +371,6 @@ public class GestorFTP {
             System.err.println("Error al encontrar el directorio. Excepción: " + ex.getMessage());
         } catch (InterruptedException ex) {
             System.err.println("Error relacionado con hilos y procesos (Interrumpidos). Excepción: " + ex.getMessage());
-        }
-    }
-
-    // Método para descargar todos los archivos de la carpeta local
-    void descargarTodosLosArchivos() {
-        try {
-            // Establece conexión con el servidor FTP
-            conectar();
-            // Lista los archivos en el directorio remoto
-            FTPFile[] files = clienteFTP.listFiles("/ftp");
-            for (FTPFile file : files) {
-                if (!file.isDirectory()) {
-                    descargarFichero(file.getName());
-                }
-            }
-            desconectar();
-        } catch (IOException ex) {
-            System.err.println("Error al descargar los archivos. Excepción: " + ex.getMessage());
         }
     }
 }
