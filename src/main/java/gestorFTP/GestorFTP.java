@@ -19,7 +19,6 @@ public class GestorFTP {
     private static final String LOCAL_FOLDER = "C:\\Users\\otero\\Desktop\\local";
     private static final String CLAVE_AES = "JoseOteros19_123";
     private Key claveSecreta;
-
     private static final String[] EXTENSIONES_TEXTO = {".txt"};
 
     public GestorFTP() {
@@ -31,7 +30,7 @@ public class GestorFTP {
         }
     }
 
-    private void conectar() throws SocketException, IOException {
+    void conectar() throws SocketException, IOException {
         clienteFTP.connect(SERVIDOR, PUERTO);
         int respuesta = clienteFTP.getReplyCode();
         if (!FTPReply.isPositiveCompletion(respuesta)) {
@@ -161,7 +160,7 @@ public class GestorFTP {
         }
     }
 
-    private void watchFolder() {
+    void watchFolder() {
         try {
             Path path = Paths.get(LOCAL_FOLDER);
             WatchService ws = FileSystems.getDefault().newWatchService();
@@ -190,16 +189,6 @@ public class GestorFTP {
             System.err.println("Error al encontrar el directorio. Excepción: " + ex.getMessage());
         } catch (InterruptedException ex) {
             System.err.println("Error relacionado con hilos y procesos (Interrumpidos). Excepción: " + ex.getMessage());
-        }
-    }
-
-    public static void main(String[] args) {
-        GestorFTP gestorFTP = new GestorFTP();
-        try {
-            gestorFTP.conectar();
-            gestorFTP.watchFolder();
-        } catch (Exception e) {
-            System.err.println("Error: " + e.getMessage());
         }
     }
 }
