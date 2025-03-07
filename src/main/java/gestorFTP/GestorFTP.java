@@ -184,22 +184,17 @@ public class GestorFTP {
 
     // Método para eliminar un archivo del servidor FTP
     private void eliminarFichero(String fileName) throws IOException {
-        // Se envía la eliminación del archivo en un hilo separado
         executorService.submit(() -> {
             try {
                 lock.lock();
-                // Establece conexión con el servidor FTP
                 conectar();
-                boolean deleted = clienteFTP.deleteFile(fileName);
-                // Verifica si el archivo fue eliminado correctamente
-                if (deleted) {
-                    System.out.println("Fichero " + fileName + " eliminado correctamente");
-                }
+
+                // Mover el archivo a /ftp/historial en lugar de eliminarlo
+                moverAHistorial(fileName);
             } catch (Exception e) {
-                System.err.println("Error al eliminar el archivo " + fileName + ": " + e.getMessage());
+                System.err.println("Error al mover el archivo " + fileName + " al historial: " + e.getMessage());
             } finally {
                 try {
-                    // Desconecta del servidor FTP
                     desconectar();
                 } catch (IOException e) {
                     throw new RuntimeException(e);
@@ -212,41 +207,46 @@ public class GestorFTP {
 
     // Método para actualizar un archivo en el servidor FTP
     private void actualizarFichero(Path path) throws IOException {
-        // Se envía la actualización del archivo en un hilo separado
         executorService.submit(() -> {
-            // Se obtiene el archivo desde la ruta
             File file = path.toFile();
-            // Verifica si el archivo existe antes de intentar actualizarlo
             if (!file.exists()) {
                 System.out.println("Error: El archivo " + file.getName() + " no existe.");
                 return;
             }
             try {
                 lock.lock();
-                // Establece conexión con el servidor FTP
-                conectar();
-                // Si es un archivo de texto, se cifra antes de actualizarlo
+                conectar(); // Asegura la conexión al servidor FTP
+
+                String remoteFilePath = "/ftp/" + file.getName();
+
+                // Verifica si el archivo ya existe en el servidor antes de actualizarlo
+                if (clienteFTP.listNames(remoteFilePath) != null) {
+                    System.out.println("El archivo ya existe en el servidor. Moviendo al historial...");
+                    moverAHistorial(file.getName()); // Mueve el antiguo a historial antes de actualizar
+                }
+
+                // Verifica si la conexión sigue activa después de mover el archivo
+                if (!clienteFTP.isConnected()) {
+                    System.out.println("Se perdió la conexión con el servidor FTP. Reconectando...");
+                    conectar();
+                }
+
                 boolean actualizado;
                 if (esArchivoDeTexto(file.getName())) {
-                    // Lee el contenido del archivo y lo convierte a bytes
                     byte[] contenido = Files.readAllBytes(path);
-                    // Cifra el contenido
                     byte[] contenidoCifrado = cifrarContenido(contenido);
-                    String nombreCifrado = file.getName();
-                    String remoteFilePath = "/ftp/" + nombreCifrado;
-                    System.out.println("Actualizando archivo de texto cifrado: " + nombreCifrado);
-                    InputStream is = new ByteArrayInputStream(contenidoCifrado);
-                    actualizado = clienteFTP.storeFile(remoteFilePath, is);
-                    is.close();
+                    System.out.println("Actualizando archivo de texto cifrado: " + file.getName());
+
+                    try (InputStream is = new ByteArrayInputStream(contenidoCifrado)) {
+                        actualizado = clienteFTP.storeFile(remoteFilePath, is);
+                    }
                 } else {
-                    // Si no es un archivo de texto, se actualiza sin cifrar
-                    String remoteFilePath = "/ftp/" + file.getName();
-                    FileInputStream fis = new FileInputStream(file);
-                    actualizado = clienteFTP.storeFile(remoteFilePath, fis);
-                    fis.close();
+                    try (FileInputStream fis = new FileInputStream(file)) {
+                        actualizado = clienteFTP.storeFile(remoteFilePath, fis);
+                    }
                 }
+
                 int replyCode = clienteFTP.getReplyCode();
-                // Verifica si el archivo fue actualizado correctamente
                 if (actualizado) {
                     System.out.println("Fichero " + file.getName() + " actualizado correctamente en el servidor.");
                 } else {
@@ -258,7 +258,7 @@ public class GestorFTP {
                 try {
                     desconectar();
                 } catch (IOException e) {
-                    throw new RuntimeException(e);
+                    System.err.println("Error al cerrar la conexión FTP: " + e.getMessage());
                 } finally {
                     lock.unlock();
                 }
@@ -331,6 +331,33 @@ public class GestorFTP {
                 }
             }
         });
+    }
+
+    private void moverAHistorial(String fileName) throws IOException {
+        String historialDir = "/ftp/historial/";
+        conectar();
+
+        // Obtener la extensión y el nombre base del archivo
+        int lastDotIndex = fileName.lastIndexOf(".");
+        String baseName = (lastDotIndex == -1) ? fileName : fileName.substring(0, lastDotIndex);
+        String extension = (lastDotIndex == -1) ? "" : fileName.substring(lastDotIndex);
+
+        // Determinar el siguiente número disponible (_oldX)
+        int version = 0;
+        String newFileName;
+        do {
+            newFileName = historialDir + baseName + "_old" + version + extension;
+            version++;
+        } while (clienteFTP.listFiles(newFileName).length > 0);
+
+        // Renombrar y mover el archivo al directorio de historial
+        boolean renamed = clienteFTP.rename("/ftp/" + fileName, newFileName);
+        if (renamed) {
+            System.out.println("Fichero " + fileName + " movido a historial como " + newFileName);
+        } else {
+            System.out.println("Error al mover " + fileName + " al historial.");
+        }
+        desconectar();
     }
 
     // Método que monitorea la carpeta local y sincroniza los cambios con el servidor FTP
